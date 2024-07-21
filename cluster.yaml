@@ -14,28 +14,104 @@
           register: cluster_config
           delegate_to: "{{ groups['proxmox'][0] }}"
     
+        - name: Debug cluster configuration
+          debug:
+            msg: "Cluster configuration exists: {{ cluster_config.stat.exists }}"
+          delegate_to: localhost
+    
         - name: Create cluster on the first node
           command: pvecm create my-cluster
+          register: create_cluster_result
+          when: is_first_node and not cluster_config.stat.exists
+    
+        - name: Debug cluster creation command result
+          debug:
+            var: create_cluster_result
           when: is_first_node and not cluster_config.stat.exists
     
         - name: Get the IP address of the first node
-          command: hostname -I
+          shell: hostname -I | cut -d' ' -f1
           register: node1_ip
           when: is_first_node
+    
+        - name: Set fact for first node IP
+          set_fact:
+            first_node_ip: "{{ node1_ip.stdout }}"
+          when: is_first_node and node1_ip.stdout is defined
+    
+        - name: Debug node1 IP
+          debug:
+            msg: "Node1 IP: {{ first_node_ip }}"
+          when: is_first_node and first_node_ip is defined
     
         - name: Wait for the first node to create the cluster
           wait_for:
             path: /etc/pve/corosync.conf
             state: present
+            timeout: 300
           delegate_to: "{{ groups['proxmox'][0] }}"
           when: not is_first_node
     
+        - name: Debug wait for cluster creation
+          debug:
+            msg: "Waiting for cluster creation on first node"
+          when: not is_first_node
+    
+        - name: Check if corosync.conf exists on the first node
+          stat:
+            path: /etc/pve/corosync.conf
+          register: corosync_conf
+          delegate_to: "{{ groups['proxmox'][0] }}"
+          retries: 10
+          delay: 15
+          until: corosync_conf.stat.exists
+          when: not is_first_node
+    
+        - name: Debug corosync.conf status
+          debug:
+            msg: "corosync.conf exists: {{ corosync_conf.stat.exists }}"
+          when: not is_first_node
+    
+        - name: Ensure first_node_ip is accessible from this node
+          shell: ping -c 3 {{ hostvars[groups['proxmox'][0]].first_node_ip }}
+          register: ping_result
+          when: not is_first_node and hostvars[groups['proxmox'][0]].first_node_ip is defined
+    
+        - name: Debug ping result
+          debug:
+            var: ping_result
+          when: not is_first_node and hostvars[groups['proxmox'][0]].first_node_ip is defined
+    
+        - name: Ensure corosync.conf exists before adding node to cluster
+          stat:
+            path: /etc/pve/corosync.conf
+          register: corosync_conf
+          delegate_to: "{{ groups['proxmox'][0] }}"
+    
+        - name: Debug corosync.conf status before adding node
+          debug:
+            msg: "corosync.conf exists: {{ corosync_conf.stat.exists }} before adding node"
+          when: not is_first_node
+    
         - name: Add this node to the cluster
-          command: pvecm add {{ hostvars[groups['proxmox'][0]].inventory_hostname }}
-          when: not is_first_node and not cluster_config.stat.exists
+          shell: pvecm add {{ hostvars[groups['proxmox'][0]].first_node_ip }}
+          register: add_node_result
+          changed_when: add_node_result.rc == 0
+          failed_when: add_node_result.rc != 0
+          when: not is_first_node and corosync_conf.stat.exists and hostvars[groups['proxmox'][0]].first_node_ip is defined
+    
+        - name: Debug adding node to cluster
+          debug:
+            var: add_node_result
+          when: not is_first_node and corosync_conf.stat.exists and hostvars[groups['proxmox'][0]].first_node_ip is defined
     
         - name: Setup QDevice for two-node cluster
           command: pvecm qdevice setup {{ qdevice_ip }}
+          when: is_first_node and is_two_node_cluster and not cluster_config.stat.exists
+    
+        - name: Debug setting up QDevice
+          debug:
+            msg: "Setting up QDevice for two-node cluster"
           when: is_first_node and is_two_node_cluster and not cluster_config.stat.exists
     
     - name: Ensure all nodes are in the cluster
@@ -49,10 +125,10 @@
           retries: 5
           delay: 15
           until: cluster_status is succeeded
-          when: inventory_hostname == groups['proxmox'][-1]
+          when: inventory_hostname == groups['proxmox'][0]
     
         - name: Display cluster status
           debug:
             var: cluster_status.stdout_lines
-          when: inventory_hostname == groups['proxmox'][-1]
+          when: inventory_hostname == groups['proxmox'][0]
     
