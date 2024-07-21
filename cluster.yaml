@@ -1,0 +1,37 @@
+---
+    - name: Setup Proxmox Cluster
+      hosts: proxmox
+      become: yes
+      tasks:
+        - name: Determine if this is the first node
+          set_fact:
+            is_first_node: "{{ inventory_hostname == groups['proxmox'][0] }}"
+    
+        - name: Create cluster on the first node
+          command: pvecm create my-cluster
+          when: is_first_node
+    
+        - name: Get the IP address of the first node
+          command: hostname -I
+          register: node1_ip
+          when: is_first_node
+    
+        - name: Wait for the first node to create the cluster
+          wait_for:
+            path: /etc/pve/corosync.conf
+            state: file
+          delegate_to: "{{ groups['proxmox'][0] }}"
+          when: not is_first_node
+    
+        - name: Add this node to the cluster
+          command: pvecm add {{ hostvars[groups['proxmox'][0]].inventory_hostname }}
+          when: not is_first_node
+          run_once: true
+    
+        - name: Loop through remaining nodes to add to the cluster
+          command: pvecm add {{ hostvars[groups['proxmox'][0]].inventory_hostname }}
+          when: inventory_hostname != groups['proxmox'][0]
+          run_once: false
+          delegate_to: "{{ item }}"
+          loop: "{{ groups['proxmox'] | difference([groups['proxmox'][0]]) }}"
+    
