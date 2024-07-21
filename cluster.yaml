@@ -3,13 +3,20 @@
       hosts: proxmox
       become: yes
       tasks:
-        - name: Determine if this is the first node
+        - name: Determine if this is the first node and cluster size
           set_fact:
             is_first_node: "{{ inventory_hostname == groups['proxmox'][0] }}"
+            is_two_node_cluster: "{{ groups['proxmox'] | length == 2 }}"
+    
+        - name: Check if the cluster is already created
+          stat:
+            path: /etc/pve/corosync.conf
+          register: cluster_config
+          delegate_to: "{{ groups['proxmox'][0] }}"
     
         - name: Create cluster on the first node
           command: pvecm create my-cluster
-          when: is_first_node
+          when: is_first_node and not cluster_config.stat.exists
     
         - name: Get the IP address of the first node
           command: hostname -I
@@ -19,19 +26,33 @@
         - name: Wait for the first node to create the cluster
           wait_for:
             path: /etc/pve/corosync.conf
-            state: file
+            state: present
           delegate_to: "{{ groups['proxmox'][0] }}"
           when: not is_first_node
     
         - name: Add this node to the cluster
           command: pvecm add {{ hostvars[groups['proxmox'][0]].inventory_hostname }}
-          when: not is_first_node
-          run_once: true
+          when: not is_first_node and not cluster_config.stat.exists
     
-        - name: Loop through remaining nodes to add to the cluster
-          command: pvecm add {{ hostvars[groups['proxmox'][0]].inventory_hostname }}
-          when: inventory_hostname != groups['proxmox'][0]
-          run_once: false
-          delegate_to: "{{ item }}"
-          loop: "{{ groups['proxmox'] | difference([groups['proxmox'][0]]) }}"
+        - name: Setup QDevice for two-node cluster
+          command: pvecm qdevice setup {{ qdevice_ip }}
+          when: is_first_node and is_two_node_cluster and not cluster_config.stat.exists
+    
+    - name: Ensure all nodes are in the cluster
+      hosts: proxmox
+      become: yes
+      tasks:
+        - name: Verify cluster status
+          command: pvecm status
+          register: cluster_status
+          failed_when: "'Quorum' not in cluster_status.stdout"
+          retries: 5
+          delay: 15
+          until: cluster_status is succeeded
+          when: inventory_hostname == groups['proxmox'][-1]
+    
+        - name: Display cluster status
+          debug:
+            var: cluster_status.stdout_lines
+          when: inventory_hostname == groups['proxmox'][-1]
     
