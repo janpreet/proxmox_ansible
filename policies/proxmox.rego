@@ -95,7 +95,17 @@ deny[msg] {
     msg := "QDevice setup should only be performed for two-node clusters"
 }
 
-allow := msg {
+# New rule to determine if the playbook is allowed
+is_allowed := true {
     count(deny) == 0
-    msg := "Playbook is allowed. No policy violations detected."
+}
+
+is_allowed := false {
+    count(deny) > 0
+}
+
+# Main output
+main := {
+    "allowed": is_allowed,
+    "violations": deny
 }
